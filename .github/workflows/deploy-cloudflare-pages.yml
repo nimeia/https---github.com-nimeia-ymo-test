@@ -72,7 +72,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: ${{ env.APP_DIR }}
-          command: pages deploy ${{ env.BUILD_DIR }} --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT_NAME }} --branch=main
+          command: pages deploy ${{ env.BUILD_DIR }} --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT_NAME }}
 
       - name: Print production URL
         if: steps.deploy-production.outcome == 'success'
