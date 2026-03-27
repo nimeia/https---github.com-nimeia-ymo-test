@@ -3,7 +3,7 @@ import type { HotspotGeometry } from '../../../h5-question-content.schema';
 import type { RuntimeQuestionPageViewModel, RuntimeStemBlockViewModel } from '../../../h5-runtime-adapter';
 import type { RuntimeJudgeResult, RuntimeSubmissionAnswer } from '../../../h5-runtime-judge.schema';
 import { getQuestionVisualMeta, resolveQuestionImagePath } from '../lib/questionVisuals';
-import { getHotspotReplayConfig } from '../lib/hotspotPlayback';
+import { getHotspotPinpointHints, getHotspotReplayConfig, type HotspotPinpointHint } from '../lib/hotspotPlayback';
 
 interface Props {
   question: RuntimeQuestionPageViewModel;
@@ -12,14 +12,24 @@ interface Props {
   onChange?: (answer: RuntimeSubmissionAnswer | undefined) => void;
   reviewVisible?: boolean;
   judgeResult?: RuntimeJudgeResult;
+  onPracticeAgain?: () => void;
 }
 
-export function QuestionFigureRenderer({ question, item, draft, onChange, reviewVisible = false, judgeResult }: Props) {
+export function QuestionFigureRenderer({
+  question,
+  item,
+  draft,
+  onChange,
+  reviewVisible = false,
+  judgeResult,
+  onPracticeAgain,
+}: Props) {
   const [zoomed, setZoomed] = useState(false);
   const [activeLayer, setActiveLayer] = useState<string | null>(null);
   const [replayIndex, setReplayIndex] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [showAnswerMask, setShowAnswerMask] = useState(true);
+  const [activePinpointId, setActivePinpointId] = useState<string | null>(null);
   const meta = useMemo(() => getQuestionVisualMeta(question), [question]);
   const replayConfig = useMemo(() => getHotspotReplayConfig(question.questionId), [question.questionId]);
   const block = item.block;
@@ -51,36 +61,50 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
     : null;
   const supportsDirectClick = blockHotspots.length > 0 && !!onChange;
   const currentReplayStep = isWrongReview && replayConfig ? replayConfig.steps[replayIndex] : null;
+  const pinpointHints = useMemo(
+    () => (isWrongReview ? getHotspotPinpointHints(question, judgeResult, selectedIds) : []),
+    [isWrongReview, question, judgeResult, selectedIds],
+  );
+  const activePinpointHint = pinpointHints.find((item) => item.id === activePinpointId) ?? null;
 
   useEffect(() => {
-    if (!currentReplayStep?.focusLayer) return;
+    if (!currentReplayStep?.focusLayer || activePinpointHint?.focusLayer) return;
     setActiveLayer(currentReplayStep.focusLayer);
-  }, [currentReplayStep?.focusLayer]);
+  }, [currentReplayStep?.focusLayer, activePinpointHint?.focusLayer]);
 
   useEffect(() => {
     if (!isWrongReview || !replayConfig) {
       setReplayPlaying(false);
       setReplayIndex(0);
+      setActivePinpointId(null);
       return;
     }
     setReplayIndex(0);
     setReplayPlaying(true);
     setShowAnswerMask(true);
+    setActivePinpointId(null);
   }, [isWrongReview, replayConfig?.questionId]);
 
   useEffect(() => {
-    if (!replayPlaying || !replayConfig || replayConfig.steps.length <= 1) return;
+    if (!replayPlaying || !replayConfig || replayConfig.steps.length <= 1 || activePinpointHint) return;
     const timer = window.setInterval(() => {
       setReplayIndex((current) => (current + 1) % replayConfig.steps.length);
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [replayPlaying, replayConfig]);
+  }, [replayPlaying, replayConfig, activePinpointHint]);
+
+  useEffect(() => {
+    if (!activePinpointHint?.focusLayer) return;
+    setActiveLayer(activePinpointHint.focusLayer);
+  }, [activePinpointHint?.focusLayer]);
 
   const visibleHotspots =
     layerOptions.length > 1 && activeLayer
       ? blockHotspots.filter((hotspot) => hotspot.meta?.layer === activeLayer)
       : blockHotspots;
   const stageClass = `figure-stage family-${meta.family} aspect-${meta.preferredAspect ?? 'wide'}`;
+  const replayFocusIds = activePinpointHint ? [] : currentReplayStep?.relatedHotspotIds ?? [];
+  const pinpointFocusIds = activePinpointHint?.hotspotIds ?? [];
 
   return (
     <>
@@ -111,6 +135,7 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
                 className={`figure-layer-chip ${activeLayer === layer ? 'is-active' : ''}`}
                 onClick={() => {
                   setReplayPlaying(false);
+                  setActivePinpointId(null);
                   setActiveLayer(layer);
                 }}
               >
@@ -134,6 +159,11 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
                 <button className="ghost-button" type="button" onClick={() => setReplayPlaying((value) => !value)}>
                   {replayPlaying ? '暂停闪示' : '自动闪示'}
                 </button>
+                {onPracticeAgain ? (
+                  <button className="primary-button" type="button" onClick={onPracticeAgain}>
+                    回放后再练一遍
+                  </button>
+                ) : null}
               </div>
             </div>
             <div className="replay-step-row">
@@ -141,9 +171,10 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
                 <button
                   key={step.id}
                   type="button"
-                  className={`replay-step-chip ${index === replayIndex ? 'is-active' : ''}`}
+                  className={`replay-step-chip ${index === replayIndex && !activePinpointHint ? 'is-active' : ''}`}
                   onClick={() => {
                     setReplayPlaying(false);
+                    setActivePinpointId(null);
                     setReplayIndex(index);
                   }}
                 >
@@ -157,46 +188,60 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
                 <p>{currentReplayStep.text}</p>
               </div>
             ) : null}
+
+            {pinpointHints.length ? (
+              <div className="pinpoint-panel">
+                <div className="pinpoint-panel-head">
+                  <div>
+                    <div className="eyebrow">错因定点提示</div>
+                    <strong>把错因直接定位到图上的具体位置</strong>
+                  </div>
+                  {activePinpointHint ? (
+                    <button className="ghost-button" type="button" onClick={() => setActivePinpointId(null)}>
+                      回到回放步骤
+                    </button>
+                  ) : null}
+                </div>
+                <div className="pinpoint-chip-row">
+                  {pinpointHints.map((hint) => (
+                    <button
+                      key={hint.id}
+                      type="button"
+                      className={`pinpoint-chip tone-${hint.tone} ${activePinpointId === hint.id ? 'is-active' : ''}`}
+                      onClick={() => {
+                        setReplayPlaying(false);
+                        setActivePinpointId(hint.id);
+                      }}
+                    >
+                      {hint.title}
+                    </button>
+                  ))}
+                </div>
+                {activePinpointHint ? <PinpointCard hint={activePinpointHint} /> : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
 
-        <div className={`figure-canvas-wrap ${supportsDirectClick ? 'is-interactive' : ''} ${isWrongReview ? 'is-reviewing' : ''}`}>
-          <div className="figure-canvas-grid" aria-hidden="true" />
-          <img className="figure-image" src={src} alt={block.alt ?? question.question.title} loading="lazy" />
-          {blockHotspots.length > 0 ? (
-            <svg className="figure-hotspot-svg" viewBox="0 0 1 1" preserveAspectRatio="none">
-              {visibleHotspots.map((hotspot) => {
-                const selected = selectedIds.includes(hotspot.id);
-                const inAnswer = answerHotspotIds.includes(hotspot.id);
-                const inReplay = currentReplayStep?.relatedHotspotIds.includes(hotspot.id) ?? false;
-                return (
-                  <g
-                    key={hotspot.id}
-                    className={getHotspotGroupClass({
-                      hotspot,
-                      selected,
-                      inAnswer,
-                      inReplay,
-                      reviewVisible: isWrongReview,
-                      showAnswerMask,
-                    })}
-                    onClick={(event: { stopPropagation: () => void }) => {
-                      if (!supportsDirectClick || isWrongReview) return;
-                      event.stopPropagation();
-                      onChange?.({
-                        kind: 'hotspot_selection',
-                        hotspotIds: toggleHotspotId(selectedIds, hotspot.id, hotspotWidget?.maxSelectable),
-                      });
-                    }}
-                  >
-                    {renderHotspotShape(hotspot.geometry)}
-                    {shouldRenderHotspotLabel(hotspot) ? renderHotspotLabel(hotspot.geometry, getHotspotLabel(hotspot)) : null}
-                  </g>
-                );
-              })}
-            </svg>
-          ) : null}
-        </div>
+        <FigureCanvas
+          src={src}
+          alt={block.alt ?? question.question.title}
+          hotspots={visibleHotspots}
+          selectedIds={selectedIds}
+          answerHotspotIds={answerHotspotIds}
+          replayFocusIds={replayFocusIds}
+          pinpointFocusIds={pinpointFocusIds}
+          supportsDirectClick={supportsDirectClick}
+          reviewVisible={isWrongReview}
+          showAnswerMask={showAnswerMask}
+          onHotspotClick={(hotspotId) => {
+            if (!supportsDirectClick || isWrongReview) return;
+            onChange?.({
+              kind: 'hotspot_selection',
+              hotspotIds: toggleHotspotId(selectedIds, hotspotId, hotspotWidget?.maxSelectable),
+            });
+          }}
+        />
 
         <div className="figure-hints">
           {meta.hints.map((hint) => (
@@ -206,6 +251,7 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
           ))}
           {supportsDirectClick ? <span className="figure-hint-chip is-accent">支持图上直接点选作答</span> : null}
           {isWrongReview ? <span className="figure-hint-chip is-accent">已进入错题回放模式</span> : null}
+          {activePinpointHint ? <span className="figure-hint-chip is-warning">当前定位：{activePinpointHint.title}</span> : null}
         </div>
       </figure>
 
@@ -223,32 +269,18 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
             </div>
             <div className="image-modal-body is-figure-modal">
               <div className="image-modal-figure-wrap">
-                <img className="image-modal-img" src={src} alt={block.alt ?? question.question.title} />
-                {blockHotspots.length > 0 ? (
-                  <svg className="figure-hotspot-svg is-modal" viewBox="0 0 1 1" preserveAspectRatio="none">
-                    {visibleHotspots.map((hotspot) => {
-                      const selected = selectedIds.includes(hotspot.id);
-                      const inAnswer = answerHotspotIds.includes(hotspot.id);
-                      const inReplay = currentReplayStep?.relatedHotspotIds.includes(hotspot.id) ?? false;
-                      return (
-                        <g
-                          key={hotspot.id}
-                          className={getHotspotGroupClass({
-                            hotspot,
-                            selected,
-                            inAnswer,
-                            inReplay,
-                            reviewVisible: isWrongReview,
-                            showAnswerMask,
-                          })}
-                        >
-                          {renderHotspotShape(hotspot.geometry)}
-                          {shouldRenderHotspotLabel(hotspot) ? renderHotspotLabel(hotspot.geometry, getHotspotLabel(hotspot)) : null}
-                        </g>
-                      );
-                    })}
-                  </svg>
-                ) : null}
+                <FigureCanvas
+                  src={src}
+                  alt={block.alt ?? question.question.title}
+                  hotspots={visibleHotspots}
+                  selectedIds={selectedIds}
+                  answerHotspotIds={answerHotspotIds}
+                  replayFocusIds={replayFocusIds}
+                  pinpointFocusIds={pinpointFocusIds}
+                  supportsDirectClick={false}
+                  reviewVisible={isWrongReview}
+                  showAnswerMask={showAnswerMask}
+                />
               </div>
             </div>
             <div className="image-modal-hints">
@@ -257,12 +289,88 @@ export function QuestionFigureRenderer({ question, item, draft, onChange, review
                   {hint}
                 </span>
               ))}
-              {currentReplayStep ? <span className="figure-hint-chip is-accent">当前回放：{currentReplayStep.title}</span> : null}
+              {currentReplayStep && !activePinpointHint ? <span className="figure-hint-chip is-accent">当前回放：{currentReplayStep.title}</span> : null}
+              {activePinpointHint ? <span className="figure-hint-chip is-warning">当前定位：{activePinpointHint.title}</span> : null}
             </div>
           </div>
         </div>
       )}
     </>
+  );
+}
+
+function FigureCanvas({
+  src,
+  alt,
+  hotspots,
+  selectedIds,
+  answerHotspotIds,
+  replayFocusIds,
+  pinpointFocusIds,
+  supportsDirectClick,
+  reviewVisible,
+  showAnswerMask,
+  onHotspotClick,
+}: {
+  src: string;
+  alt: string;
+  hotspots: RuntimeQuestionPageViewModel['hotspots'];
+  selectedIds: string[];
+  answerHotspotIds: string[];
+  replayFocusIds: string[];
+  pinpointFocusIds: string[];
+  supportsDirectClick: boolean;
+  reviewVisible: boolean;
+  showAnswerMask: boolean;
+  onHotspotClick?: (hotspotId: string) => void;
+}) {
+  return (
+    <div className={`figure-canvas-wrap ${supportsDirectClick ? 'is-interactive' : ''} ${reviewVisible ? 'is-reviewing' : ''}`}>
+      <div className="figure-canvas-grid" aria-hidden="true" />
+      <img className="figure-image" src={src} alt={alt} loading="lazy" />
+      {hotspots.length > 0 ? (
+        <svg className="figure-hotspot-svg" viewBox="0 0 1 1" preserveAspectRatio="none">
+          {hotspots.map((hotspot) => {
+            const selected = selectedIds.includes(hotspot.id);
+            const inAnswer = answerHotspotIds.includes(hotspot.id);
+            const inReplay = replayFocusIds.includes(hotspot.id);
+            const inPinpoint = pinpointFocusIds.includes(hotspot.id);
+            return (
+              <g
+                key={hotspot.id}
+                className={getHotspotGroupClass({
+                  hotspot,
+                  selected,
+                  inAnswer,
+                  inReplay,
+                  inPinpoint,
+                  reviewVisible,
+                  showAnswerMask,
+                })}
+                onClick={(event: { stopPropagation: () => void }) => {
+                  if (!supportsDirectClick) return;
+                  event.stopPropagation();
+                  onHotspotClick?.(hotspot.id);
+                }}
+              >
+                {renderHotspotShape(hotspot.geometry)}
+                {shouldRenderHotspotLabel(hotspot) ? renderHotspotLabel(hotspot.geometry, getHotspotLabel(hotspot)) : null}
+              </g>
+            );
+          })}
+        </svg>
+      ) : null}
+    </div>
+  );
+}
+
+function PinpointCard({ hint }: { hint: HotspotPinpointHint }) {
+  return (
+    <div className={`pinpoint-card tone-${hint.tone}`}>
+      <strong>{hint.title}</strong>
+      <p>{hint.text}</p>
+      <div className="pinpoint-card-meta">已定位 {hint.hotspotIds.length} 处重点位置</div>
+    </div>
   );
 }
 
@@ -331,6 +439,7 @@ function getHotspotGroupClass({
   selected,
   inAnswer,
   inReplay,
+  inPinpoint,
   reviewVisible,
   showAnswerMask,
 }: {
@@ -338,6 +447,7 @@ function getHotspotGroupClass({
   selected: boolean;
   inAnswer: boolean;
   inReplay: boolean;
+  inPinpoint: boolean;
   reviewVisible: boolean;
   showAnswerMask: boolean;
 }): string {
@@ -347,6 +457,7 @@ function getHotspotGroupClass({
   if (selected && !inAnswer) classes.push('is-wrong-selected');
   if (showAnswerMask && inAnswer) classes.push('is-answer');
   if (inReplay) classes.push('is-replay-focus');
-  if (reviewVisible && !inReplay && showAnswerMask) classes.push('is-review-dim');
+  if (inPinpoint) classes.push('is-pinpoint-focus');
+  if (reviewVisible && !inReplay && !inPinpoint && showAnswerMask) classes.push('is-review-dim');
   return classes.join(' ');
 }

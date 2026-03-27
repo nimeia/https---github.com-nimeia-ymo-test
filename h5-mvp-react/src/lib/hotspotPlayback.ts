@@ -1,4 +1,5 @@
 import type { RuntimeQuestionPageViewModel } from '../../../h5-runtime-adapter';
+import type { RuntimeJudgeResult } from '../../../h5-runtime-judge.schema';
 
 export interface HotspotReplayStep {
   id: string;
@@ -12,6 +13,15 @@ export interface HotspotReplayConfig {
   questionId: string;
   intro: string;
   steps: HotspotReplayStep[];
+}
+
+export interface HotspotPinpointHint {
+  id: string;
+  title: string;
+  text: string;
+  hotspotIds: string[];
+  tone: 'missed' | 'extra';
+  focusLayer?: string;
 }
 
 const HOTSPOT_REPLAY_CONFIGS: Record<string, HotspotReplayConfig> = {
@@ -117,4 +127,114 @@ export function getHotspotReplayConfig(questionId: string): HotspotReplayConfig 
 
 export function hasHotspotReplay(question: RuntimeQuestionPageViewModel): boolean {
   return !!getHotspotReplayConfig(question.questionId) && question.hotspots.length > 0;
+}
+
+export function getHotspotPinpointHints(
+  question: RuntimeQuestionPageViewModel,
+  judgeResult?: RuntimeJudgeResult,
+  selectedIds: string[] = [],
+): HotspotPinpointHint[] {
+  const answer = question.judge.answer;
+  if (!judgeResult || judgeResult.correct || answer?.kind !== 'hotspot_selection') {
+    return [];
+  }
+
+  const hotspotMap = new Map(question.hotspots.map((hotspot) => [hotspot.id, hotspot]));
+  const selectedSet = new Set(selectedIds);
+  const answerSet = new Set(answer.hotspotIds);
+  const missedIds = answer.hotspotIds.filter((id) => !selectedSet.has(id));
+  const extraIds = selectedIds.filter((id) => !answerSet.has(id));
+  const replayConfig = getHotspotReplayConfig(question.questionId);
+  const hints: HotspotPinpointHint[] = [];
+
+  if (missedIds.length > 0) {
+    if (replayConfig) {
+      replayConfig.steps.forEach((step) => {
+        const related = step.relatedHotspotIds.filter((id) => missedIds.includes(id));
+        if (!related.length) return;
+        hints.push({
+          id: `missed-${step.id}`,
+          title: `漏点：${step.title}`,
+          text: `这一层还有 ${related.length} 个位置没点到。先盯住这些位置，再重新数一遍。`,
+          hotspotIds: related,
+          tone: 'missed',
+          focusLayer: step.focusLayer,
+        });
+      });
+    }
+    if (!hints.some((item) => item.tone === 'missed')) {
+      hints.push(...buildGroupedHints(missedIds, hotspotMap, 'missed'));
+    }
+  }
+
+  if (extraIds.length > 0) {
+    hints.push(...buildGroupedHints(extraIds, hotspotMap, 'extra'));
+  }
+
+  return hints;
+}
+
+function buildGroupedHints(
+  hotspotIds: string[],
+  hotspotMap: Map<string, RuntimeQuestionPageViewModel['hotspots'][number]>,
+  tone: 'missed' | 'extra',
+): HotspotPinpointHint[] {
+  const grouped = new Map<string, string[]>();
+
+  hotspotIds.forEach((id) => {
+    const hotspot = hotspotMap.get(id);
+    const groupKey = getHotspotGroupKey(hotspot);
+    const current = grouped.get(groupKey) ?? [];
+    current.push(id);
+    grouped.set(groupKey, current);
+  });
+
+  return Array.from(grouped.entries()).map(([groupKey, ids], index) => ({
+    id: `${tone}-${groupKey}-${index}`,
+    title: tone === 'missed' ? `漏点：${formatGroupTitle(groupKey, hotspotMap, ids)}` : `误点：${formatGroupTitle(groupKey, hotspotMap, ids)}`,
+    text:
+      tone === 'missed'
+        ? `这 ${ids.length} 个位置属于正确答案，但本次没有点到。优先补看：${summarizeHotspotNames(ids, hotspotMap)}。`
+        : `这 ${ids.length} 个位置不属于正确答案。下次先排除：${summarizeHotspotNames(ids, hotspotMap)}。`,
+    hotspotIds: ids,
+    tone,
+    focusLayer: getFocusLayerForGroup(groupKey),
+  }));
+}
+
+function getHotspotGroupKey(hotspot?: RuntimeQuestionPageViewModel['hotspots'][number]): string {
+  if (!hotspot) return '未命名区域';
+  const meta = hotspot.meta ?? {};
+  if (typeof meta.layer === 'string' && meta.layer) return `layer:${meta.layer}`;
+  if (typeof meta.zone === 'string' && meta.zone) return `zone:${meta.zone}`;
+  if (typeof meta.displayStyle === 'string' && meta.displayStyle) return `style:${meta.displayStyle}`;
+  return `label:${hotspot.label}`;
+}
+
+function formatGroupTitle(
+  groupKey: string,
+  hotspotMap: Map<string, RuntimeQuestionPageViewModel['hotspots'][number]>,
+  ids: string[],
+): string {
+  const [kind, value] = groupKey.split(':');
+  if (kind === 'layer' && value) return `${value.replace('x', ' × ')} 这一层`;
+  if (kind === 'zone' && value) return value.replace(/-/g, ' ');
+  if (kind === 'style' && value === 'ghost-cube') return '被挡住的方块位置';
+  if (kind === 'style' && value === 'tile-gap') return '缺口区域';
+  return hotspotMap.get(ids[0])?.label ?? '目标区域';
+}
+
+function summarizeHotspotNames(
+  ids: string[],
+  hotspotMap: Map<string, RuntimeQuestionPageViewModel['hotspots'][number]>,
+): string {
+  return ids
+    .slice(0, 3)
+    .map((id) => hotspotMap.get(id)?.label ?? id)
+    .join('、') + (ids.length > 3 ? ' 等' : '');
+}
+
+function getFocusLayerForGroup(groupKey: string): string | undefined {
+  const [kind, value] = groupKey.split(':');
+  return kind === 'layer' ? value : undefined;
 }

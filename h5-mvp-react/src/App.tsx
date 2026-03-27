@@ -345,6 +345,16 @@ function PlayScreen({
   const timer = currentQuestionState?.timer;
   const remainingSeconds = timer?.remainingMs ? Math.max(0, Math.ceil(timer.remainingMs / 1000)) : undefined;
   const latestJudgeResult = currentQuestionState?.latestJudgeResult ?? state.lastJudgeResult;
+  const canPracticeAgain = !!currentQuestion && !!latestJudgeResult && !latestJudgeResult.correct && state.reviewVisible && currentQuestion.hotspots.length > 0;
+
+  const handlePracticeAgain = () => {
+    if (!currentQuestion) return;
+    onEmit('CHANGE_DRAFT', {
+      questionId: currentQuestion.questionId,
+      answer: undefined,
+      meta: { dirty: false, touched: true, source: 'system' },
+    });
+  };
 
   return (
     <main className="play-layout">
@@ -377,6 +387,7 @@ function PlayScreen({
                 draft={draft}
                 reviewVisible={state.reviewVisible}
                 judgeResult={latestJudgeResult}
+                onPracticeAgain={canPracticeAgain ? handlePracticeAgain : undefined}
                 onDraftChange={(answer) =>
                   onEmit('CHANGE_DRAFT', {
                     questionId: currentQuestion.questionId,
@@ -417,6 +428,11 @@ function PlayScreen({
             <button className="ghost-button" type="button" onClick={() => onEmit('OPEN_REVIEW', {})}>
               看解析
             </button>
+            {canPracticeAgain ? (
+              <button className="primary-button subtle" type="button" onClick={handlePracticeAgain}>
+                回放后再练一遍
+              </button>
+            ) : null}
             <button className="ghost-button" type="button" onClick={() => onEmit('GO_TO_NEXT_QUESTION', { autoStart: true })}>
               下一题
             </button>
@@ -461,7 +477,11 @@ function PlayScreen({
             <>
               <p className="review-title">{currentQuestion.review.explanation.summary}</p>
               <div className={`review-status-banner ${state.reviewVisible ? 'is-open' : ''}`}>
-                {state.reviewVisible ? '当前已打开解析；图形题会在题图区逐步闪示答案。' : '点击“看解析”后，会进入图上答案回放。'}
+                {state.reviewVisible
+                  ? canPracticeAgain
+                    ? '当前已打开解析；可先看错因定点提示，再点“回放后再练一遍”重新作答。'
+                    : '当前已打开解析；图形题会在题图区逐步闪示答案。'
+                  : '点击“看解析”后，会进入图上答案回放。'}
               </div>
               <ul className="review-step-list">
                 {currentQuestion.review.explanation.steps.map((step, index) => (
@@ -479,6 +499,11 @@ function PlayScreen({
                       <li key={`${item.code}-${item.title}`}>{item.title}：{item.text}</li>
                     ))}
                   </ul>
+                  {canPracticeAgain ? (
+                    <button className="primary-button subtle" type="button" onClick={handlePracticeAgain}>
+                      看完提示，马上重练这题
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </>
@@ -597,12 +622,14 @@ function StemBlocks({
   reviewVisible,
   judgeResult,
   onDraftChange,
+  onPracticeAgain,
 }: {
   question: NonNullable<NonNullable<ReturnType<typeof useRuntimeMachineDemo>['state']>['currentQuestion']>;
   draft?: RuntimeSubmissionAnswer;
   reviewVisible?: boolean;
   judgeResult?: NonNullable<NonNullable<ReturnType<typeof useRuntimeMachineDemo>['state']>['lastJudgeResult']>;
   onDraftChange: (answer: RuntimeSubmissionAnswer | undefined) => void;
+  onPracticeAgain?: () => void;
 }) {
   return (
     <div className="stem-blocks">
@@ -617,6 +644,7 @@ function StemBlocks({
               draft={draft}
               reviewVisible={reviewVisible}
               judgeResult={judgeResult}
+              onPracticeAgain={onPracticeAgain}
               onChange={onDraftChange}
             />
           );
