@@ -1,14 +1,24 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { RuntimeSubmissionAnswer } from '../../h5-runtime-judge.schema';
-import type { HomePageData, ModuleId, ModuleLobbyData, PaperInfo, RoomCardViewModel, WrongBookEntry } from '../../h5-question-bank.types';
+import type { HomePageData, ModuleId, ModuleLobbyData, PaperInfo, QuestionRecord, RoomCardViewModel, WrongBookEntry } from '../../h5-question-bank.types';
 import { mockHomePageData, mockModuleLobbyMap } from '../../h5-question-bank.mock';
 import { fullQuestionBankConfig } from '../../h5-question-bank.full';
 import {
   featuredFullRuntimeQuestionIds,
   fullRuntimeQuestionIds,
   fullRuntimeQuestionIdsByModule,
+  fullRuntimeQuestionPageMap,
   fullRuntimeQuestionsByPaper,
 } from '../../h5-runtime-adapter.full';
+import {
+  buildQueuePracticeQuestionIds,
+  buildQueueWithSimilarQuestionIds,
+  buildSimilarPracticeTitle,
+  rankSimilarQuestions,
+  removeRetryQueueItem,
+  upsertRetryQueue,
+  type RetryQueueEntry,
+} from './lib/topicClosure';
 import { QuestionFigureRenderer } from './components/QuestionFigureRenderer';
 import { QuestionInteractionPanel } from './components/QuestionInteractionPanel';
 import { useRuntimeMachineDemo, type SessionPlan } from './hooks/useRuntimeMachineDemo';
@@ -21,11 +31,72 @@ type ScreenRoute =
   | { name: 'wrongbook' };
 
 const PAPER_ORDER = ['34Y', '35Y', '36Y', '34W'] as const;
+const RETRY_QUEUE_STORAGE_KEY = 'ymo.h5.topicClosure.retryQueue.v1';
+const SIMILAR_HISTORY_STORAGE_KEY = 'ymo.h5.topicClosure.similarHistory.v1';
+
+
+function loadStoredStringArray(key: string): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadStoredRetryQueue(): RetryQueueEntry[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(RETRY_QUEUE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is RetryQueueEntry => !!item && typeof item.questionId === 'string');
+  } catch {
+    return [];
+  }
+}
 
 export default function App() {
   const [route, setRoute] = useState<ScreenRoute>({ name: 'home' });
   const [plan, setPlan] = useState<SessionPlan | null>(null);
+  const [retryQueue, setRetryQueue] = useState<RetryQueueEntry[]>(() => loadStoredRetryQueue());
+  const [similarHistory, setSimilarHistory] = useState<string[]>(() => loadStoredStringArray(SIMILAR_HISTORY_STORAGE_KEY));
   const runtime = useRuntimeMachineDemo(plan);
+
+  const questionRecordIndex = useMemo(
+    () => Object.fromEntries(fullQuestionBankConfig.questions.map((item) => [item.id, item])) as Record<string, QuestionRecord>,
+    [],
+  );
+  const availableQuestionIdSet = useMemo(() => new Set(Object.keys(fullRuntimeQuestionPageMap)), []);
+  const currentQuestionId = runtime.state?.currentQuestion?.questionId;
+  const currentQuestionRecord = currentQuestionId ? questionRecordIndex[currentQuestionId] : undefined;
+  const latestJudgeResult = runtime.state?.currentQuestionState?.latestJudgeResult ?? runtime.state?.lastJudgeResult;
+  const queueQuestionIds = useMemo(() => buildQueuePracticeQuestionIds(retryQueue), [retryQueue]);
+  const retryQueueRecords = useMemo(
+    () => retryQueue.map((item) => ({ entry: item, record: questionRecordIndex[item.questionId] })).filter((item) => !!item.record),
+    [questionRecordIndex, retryQueue],
+  );
+  const suggestedSimilarQuestions = useMemo(() => {
+    if (!currentQuestionRecord) return [];
+    return rankSimilarQuestions(currentQuestionRecord.id, questionRecordIndex, [...similarHistory, ...queueQuestionIds])
+      .filter((item) => availableQuestionIdSet.has(item.questionId))
+      .slice(0, 3)
+      .map((item) => ({ ...item, record: questionRecordIndex[item.questionId] }));
+  }, [availableQuestionIdSet, currentQuestionRecord, questionRecordIndex, queueQuestionIds, similarHistory]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(RETRY_QUEUE_STORAGE_KEY, JSON.stringify(retryQueue));
+  }, [retryQueue]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(SIMILAR_HISTORY_STORAGE_KEY, JSON.stringify(similarHistory));
+  }, [similarHistory]);
 
   useEffect(() => {
     if (route.name === 'play' && runtime.state?.phase === 'completed') {
@@ -67,6 +138,66 @@ export default function App() {
     setRoute({ name: 'play' });
   };
 
+  const addCurrentQuestionToRetryQueue = () => {
+    if (!currentQuestionId) return;
+    setRetryQueue((current) =>
+      upsertRetryQueue(current, {
+        questionId: currentQuestionId,
+        addedAtMs: Date.now(),
+        source: latestJudgeResult && !latestJudgeResult.correct ? 'judge_wrong' : 'manual',
+      }),
+    );
+  };
+
+  const removeFromRetryQueue = (questionId: string) => {
+    setRetryQueue((current) => removeRetryQueueItem(current, questionId));
+  };
+
+  const clearRetryQueue = () => {
+    setRetryQueue([]);
+  };
+
+  const openRetryQueuePlan = () => {
+    const questionIds = queueQuestionIds.filter((id) => availableQuestionIdSet.has(id));
+    if (!questionIds.length) return;
+    openPlan({
+      machineId: `retry-queue-${Date.now()}`,
+      title: `错题重练队列 · ${questionIds.length} 题`,
+      questionIds,
+    });
+  };
+
+  const openQueueWithSimilarPlan = () => {
+    const questionIds = buildQueueWithSimilarQuestionIds(retryQueue, questionRecordIndex, similarHistory).filter((id) =>
+      availableQuestionIdSet.has(id),
+    );
+    if (!questionIds.length) return;
+    setSimilarHistory((current) => Array.from(new Set([...current, ...questionIds])));
+    openPlan({
+      machineId: `retry-topic-${Date.now()}`,
+      title: `错题队列专题闭环 · ${questionIds.length} 题`,
+      questionIds,
+    });
+  };
+
+  const openSimilarPractice = (seedQuestionId?: string) => {
+    const seedId = seedQuestionId ?? currentQuestionId;
+    if (!seedId) return;
+    const seedRecord = questionRecordIndex[seedId];
+    if (!seedRecord) return;
+    const candidate = rankSimilarQuestions(seedId, questionRecordIndex, [...similarHistory, ...queueQuestionIds]).find((item) =>
+      availableQuestionIdSet.has(item.questionId),
+    );
+    if (!candidate) return;
+    const candidateRecord = questionRecordIndex[candidate.questionId];
+    setSimilarHistory((current) => Array.from(new Set([...current, candidate.questionId])));
+    openPlan({
+      machineId: `similar-${seedId}-${Date.now()}`,
+      title: buildSimilarPracticeTitle(seedRecord, candidateRecord),
+      questionIds: [candidate.questionId],
+    });
+  };
+
   const header = (
     <header className="app-header">
       <div>
@@ -103,6 +234,7 @@ export default function App() {
           homeData={mockHomePageData}
           quickStartSets={quickStartSets}
           papers={papers}
+          retryQueueCount={retryQueue.length}
           onOpenModule={(moduleId) => setRoute({ name: 'module', moduleId })}
           onOpenQuickStart={(key, title, questionIds) => openPlan({ machineId: key, title, questionIds })}
           onOpenPaper={(paper) =>
@@ -112,6 +244,8 @@ export default function App() {
               questionIds: fullRuntimeQuestionsByPaper[paper.code] ?? [],
             })
           }
+          onOpenRetryQueue={retryQueue.length ? openRetryQueuePlan : undefined}
+          onOpenQueueWithSimilar={retryQueue.length ? openQueueWithSimilarPlan : undefined}
         />
       )}
       {route.name === 'module' && (() => {
@@ -136,18 +270,27 @@ export default function App() {
         <PlayScreen
           title={plan?.title ?? '混合挑战'}
           state={runtime.state}
+          retryQueue={retryQueueRecords}
+          suggestedSimilarQuestions={suggestedSimilarQuestions}
           onEmit={runtime.emit}
           onRestart={runtime.restart}
           onShowResult={() => setRoute({ name: 'result' })}
           onBackHome={() => setRoute({ name: 'home' })}
           onClearSnapshot={runtime.clearSnapshot}
+          onAddCurrentToRetryQueue={addCurrentQuestionToRetryQueue}
+          onRemoveFromRetryQueue={removeFromRetryQueue}
+          onOpenRetryQueue={retryQueue.length ? openRetryQueuePlan : undefined}
+          onOpenSimilarPractice={openSimilarPractice}
         />
       )}
       {route.name === 'result' && runtime.state?.session.resultPage && (
         <ResultScreen
           result={runtime.state.session.resultPage}
+          retryQueueCount={retryQueue.length}
           onBackHome={() => setRoute({ name: 'home' })}
           onOpenWrongBook={() => setRoute({ name: 'wrongbook' })}
+          onOpenRetryQueue={retryQueue.length ? openRetryQueuePlan : undefined}
+          onOpenQueueWithSimilar={retryQueue.length ? openQueueWithSimilarPlan : undefined}
           onRetry={() => {
             runtime.restart();
             setRoute({ name: 'play' });
@@ -157,8 +300,23 @@ export default function App() {
       {route.name === 'wrongbook' && runtime.state?.session.wrongBook && (
         <WrongBookScreen
           wrongBook={runtime.state.session.wrongBook}
+          retryQueue={retryQueueRecords}
           onBackHome={() => setRoute({ name: 'home' })}
           onBackResult={() => setRoute({ name: 'result' })}
+          onOpenRetryQueue={retryQueue.length ? openRetryQueuePlan : undefined}
+          onOpenQueueWithSimilar={retryQueue.length ? openQueueWithSimilarPlan : undefined}
+          onAddToRetryQueue={(questionId) =>
+            setRetryQueue((current) =>
+              upsertRetryQueue(current, {
+                questionId,
+                addedAtMs: Date.now(),
+                source: 'wrong_book',
+              }),
+            )
+          }
+          onRemoveFromRetryQueue={removeFromRetryQueue}
+          onOpenSimilarPractice={openSimilarPractice}
+          questionRecordIndex={questionRecordIndex}
         />
       )}
     </div>
@@ -169,16 +327,22 @@ function HomeScreen({
   homeData,
   quickStartSets,
   papers,
+  retryQueueCount,
   onOpenModule,
   onOpenQuickStart,
   onOpenPaper,
+  onOpenRetryQueue,
+  onOpenQueueWithSimilar,
 }: {
   homeData: HomePageData;
   quickStartSets: Array<{ key: string; title: string; description: string; questionIds: string[] }>;
   papers: PaperInfo[];
+  retryQueueCount: number;
   onOpenModule: (moduleId: ModuleId) => void;
   onOpenQuickStart: (key: string, title: string, questionIds: string[]) => void;
   onOpenPaper: (paper: PaperInfo) => void;
+  onOpenRetryQueue?: () => void;
+  onOpenQueueWithSimilar?: () => void;
 }) {
   return (
     <main className="page-grid">
@@ -197,6 +361,16 @@ function HomeScreen({
               {item.title}
             </button>
           ))}
+          {onOpenRetryQueue ? (
+            <button className="ghost-button" type="button" onClick={onOpenRetryQueue}>
+              错题重练队列（{retryQueueCount}）
+            </button>
+          ) : null}
+          {onOpenQueueWithSimilar ? (
+            <button className="ghost-button" type="button" onClick={onOpenQueueWithSimilar}>
+              队列专题闭环
+            </button>
+          ) : null}
         </div>
       </section>
 
@@ -325,19 +499,31 @@ function ModuleScreen({
 function PlayScreen({
   title,
   state,
+  retryQueue,
+  suggestedSimilarQuestions,
   onEmit,
   onRestart,
   onShowResult,
   onBackHome,
   onClearSnapshot,
+  onAddCurrentToRetryQueue,
+  onRemoveFromRetryQueue,
+  onOpenRetryQueue,
+  onOpenSimilarPractice,
 }: {
   title: string;
   state: NonNullable<ReturnType<typeof useRuntimeMachineDemo>['state']>;
+  retryQueue: Array<{ entry: RetryQueueEntry; record?: QuestionRecord }>;
+  suggestedSimilarQuestions: Array<{ questionId: string; score: number; reason: string; record?: QuestionRecord }>;
   onEmit: ReturnType<typeof useRuntimeMachineDemo>['emit'];
   onRestart: () => void;
   onShowResult: () => void;
   onBackHome: () => void;
   onClearSnapshot: () => void;
+  onAddCurrentToRetryQueue: () => void;
+  onRemoveFromRetryQueue: (questionId: string) => void;
+  onOpenRetryQueue?: () => void;
+  onOpenSimilarPractice: (seedQuestionId?: string) => void;
 }) {
   const currentQuestion = state.currentQuestion;
   const currentQuestionState = state.currentQuestionState;
@@ -346,6 +532,8 @@ function PlayScreen({
   const remainingSeconds = timer?.remainingMs ? Math.max(0, Math.ceil(timer.remainingMs / 1000)) : undefined;
   const latestJudgeResult = currentQuestionState?.latestJudgeResult ?? state.lastJudgeResult;
   const canPracticeAgain = !!currentQuestion && !!latestJudgeResult && !latestJudgeResult.correct && state.reviewVisible && currentQuestion.hotspots.length > 0;
+  const isCurrentInRetryQueue = !!currentQuestion && retryQueue.some((item) => item.entry.questionId === currentQuestion.questionId);
+  const canAddToRetryQueue = !!currentQuestion && !!latestJudgeResult && !latestJudgeResult.correct;
 
   const handlePracticeAgain = () => {
     if (!currentQuestion) return;
@@ -428,6 +616,20 @@ function PlayScreen({
             <button className="ghost-button" type="button" onClick={() => onEmit('OPEN_REVIEW', {})}>
               看解析
             </button>
+            {canAddToRetryQueue ? (
+              <button
+                className={`ghost-button ${isCurrentInRetryQueue ? 'is-success' : ''}`}
+                type="button"
+                onClick={() => (currentQuestion && isCurrentInRetryQueue ? onRemoveFromRetryQueue(currentQuestion.questionId) : onAddCurrentToRetryQueue())}
+              >
+                {isCurrentInRetryQueue ? '移出错题队列' : '加入错题重练队列'}
+              </button>
+            ) : null}
+            {!!currentQuestion && suggestedSimilarQuestions.length ? (
+              <button className="primary-button subtle" type="button" onClick={() => onOpenSimilarPractice(currentQuestion.questionId)}>
+                同类再出一题
+              </button>
+            ) : null}
             {canPracticeAgain ? (
               <button className="primary-button subtle" type="button" onClick={handlePracticeAgain}>
                 回放后再练一遍
@@ -457,6 +659,55 @@ function PlayScreen({
               返回首页
             </button>
           </div>
+        </article>
+
+        <article className="panel-card">
+          <h3>专题闭环</h3>
+          <div className="queue-summary-box">
+            <div>
+              <strong>错题重练队列</strong>
+              <p>当前已收集 {retryQueue.length} 题，可在本轮结束后直接重练。</p>
+            </div>
+            <div className="side-actions">
+              <button className="ghost-button" type="button" onClick={onOpenRetryQueue} disabled={!onOpenRetryQueue}>
+                开始队列重练
+              </button>
+            </div>
+          </div>
+          {retryQueue.length ? (
+            <div className="queue-chip-list">
+              {retryQueue.slice(0, 6).map(({ entry, record }) => (
+                <button
+                  key={entry.questionId}
+                  type="button"
+                  className="queue-chip"
+                  onClick={() => onRemoveFromRetryQueue(entry.questionId)}
+                  title="点击移出队列"
+                >
+                  {entry.questionId} · {record?.subtype ?? '错题'}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-text">当前还没有加入队列的错题。</p>
+          )}
+          <div className="divider-line" />
+          <div>
+            <strong>同类再出一题</strong>
+            <p className="muted-text">从相同子题型里再抽一题，立即转成同专题加练。</p>
+          </div>
+          {suggestedSimilarQuestions.length ? (
+            <div className="similar-list">
+              {suggestedSimilarQuestions.map((item) => (
+                <div key={item.questionId} className="similar-card">
+                  <strong>{item.record?.title ?? item.questionId}</strong>
+                  <span>{item.record?.subtype ?? '同专题题目'} · {item.reason}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted-text">当前题暂时没有更合适的同类加练题。</p>
+          )}
         </article>
 
         <article className="panel-card">
@@ -518,14 +769,20 @@ function PlayScreen({
 
 function ResultScreen({
   result,
+  retryQueueCount,
   onRetry,
   onOpenWrongBook,
   onBackHome,
+  onOpenRetryQueue,
+  onOpenQueueWithSimilar,
 }: {
   result: NonNullable<NonNullable<ReturnType<typeof useRuntimeMachineDemo>['state']>['session']['resultPage']>;
+  retryQueueCount: number;
   onRetry: () => void;
   onOpenWrongBook: () => void;
   onBackHome: () => void;
+  onOpenRetryQueue?: () => void;
+  onOpenQueueWithSimilar?: () => void;
 }) {
   return (
     <main className="page-grid">
@@ -539,13 +796,23 @@ function ResultScreen({
           <StatPill label="总星级" value={String(result.totalStars)} />
           <StatPill label="总耗时" value={`${result.totalSeconds}s`} />
         </div>
-        <div className="hero-actions">
+        <div className="hero-actions wrap-actions">
           <button className="primary-button" type="button" onClick={onRetry}>
             再来一轮
           </button>
           <button className="ghost-button" type="button" onClick={onOpenWrongBook}>
             查看错题本
           </button>
+          {onOpenRetryQueue ? (
+            <button className="ghost-button" type="button" onClick={onOpenRetryQueue}>
+              错题重练队列（{retryQueueCount}）
+            </button>
+          ) : null}
+          {onOpenQueueWithSimilar ? (
+            <button className="ghost-button" type="button" onClick={onOpenQueueWithSimilar}>
+              队列专题闭环
+            </button>
+          ) : null}
           <button className="ghost-button" type="button" onClick={onBackHome}>
             返回首页
           </button>
@@ -571,12 +838,26 @@ function ResultScreen({
 
 function WrongBookScreen({
   wrongBook,
+  retryQueue,
   onBackHome,
   onBackResult,
+  onOpenRetryQueue,
+  onOpenQueueWithSimilar,
+  onAddToRetryQueue,
+  onRemoveFromRetryQueue,
+  onOpenSimilarPractice,
+  questionRecordIndex,
 }: {
   wrongBook: NonNullable<NonNullable<ReturnType<typeof useRuntimeMachineDemo>['state']>['session']['wrongBook']>;
+  retryQueue: Array<{ entry: RetryQueueEntry; record?: QuestionRecord }>;
   onBackHome: () => void;
   onBackResult: () => void;
+  onOpenRetryQueue?: () => void;
+  onOpenQueueWithSimilar?: () => void;
+  onAddToRetryQueue: (questionId: string) => void;
+  onRemoveFromRetryQueue: (questionId: string) => void;
+  onOpenSimilarPractice: (seedQuestionId?: string) => void;
+  questionRecordIndex: Record<string, QuestionRecord>;
 }) {
   const groups = Object.entries(wrongBook.groupedByModule) as Array<[ModuleId, WrongBookEntry[]]>;
   return (
@@ -584,10 +865,20 @@ function WrongBookScreen({
       <section className="hero-card">
         <div className="eyebrow">错题本</div>
         <h2>今日推荐重练 {wrongBook.totalWrongQuestions} 题</h2>
-        <div className="hero-actions">
+        <div className="hero-actions wrap-actions">
           <button className="ghost-button" type="button" onClick={onBackResult}>
             返回结算页
           </button>
+          {onOpenRetryQueue ? (
+            <button className="ghost-button" type="button" onClick={onOpenRetryQueue}>
+              开始错题队列重练
+            </button>
+          ) : null}
+          {onOpenQueueWithSimilar ? (
+            <button className="ghost-button" type="button" onClick={onOpenQueueWithSimilar}>
+              队列 + 同类再出一题
+            </button>
+          ) : null}
           <button className="ghost-button" type="button" onClick={onBackHome}>
             返回首页
           </button>
@@ -599,13 +890,32 @@ function WrongBookScreen({
           <article key={moduleId} className="panel-card">
             <h3>模块 {moduleId}</h3>
             {entries.length ? (
-              <ul className="meta-list">
-                {entries.map((entry) => (
-                  <li key={entry.questionId}>
-                    {entry.questionId} · {entry.title} · 错 {entry.wrongCount} 次
-                  </li>
-                ))}
-              </ul>
+              <div className="wrongbook-entry-list">
+                {entries.map((entry) => {
+                  const queued = retryQueue.some((item) => item.entry.questionId === entry.questionId);
+                  const record = questionRecordIndex[entry.questionId];
+                  return (
+                    <div key={entry.questionId} className="wrongbook-entry-card">
+                      <div>
+                        <strong>{entry.questionId} · {entry.title}</strong>
+                        <p>错 {entry.wrongCount} 次 · {record?.subtype ?? '同专题题目'} · {record?.difficultyLabel ?? '—'}</p>
+                      </div>
+                      <div className="hero-actions wrap-actions">
+                        <button className="ghost-button" type="button" onClick={() => onOpenSimilarPractice(entry.questionId)}>
+                          同类再出一题
+                        </button>
+                        <button
+                          className={`ghost-button ${queued ? 'is-success' : ''}`}
+                          type="button"
+                          onClick={() => (queued ? onRemoveFromRetryQueue(entry.questionId) : onAddToRetryQueue(entry.questionId))}
+                        >
+                          {queued ? '移出重练队列' : '加入重练队列'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
               <p>当前模块没有错题。</p>
             )}

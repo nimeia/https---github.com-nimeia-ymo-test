@@ -952,3 +952,56 @@ h3 { font-size: 18px; margin-bottom: 12px; }
     transform: scale(1);
   }
 }
+
+.queue-summary-box {
+  display: grid;
+  gap: 10px;
+}
+
+.queue-chip-list,
+.similar-list,
+.wrongbook-entry-list {
+  display: grid;
+  gap: 10px;
+}
+
+.queue-chip {
+  border: 1px dashed rgba(120, 140, 200, 0.45);
+  background: rgba(120, 140, 200, 0.08);
+  color: inherit;
+  border-radius: 999px;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.divider-line {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 12px 0;
+}
+
+.muted-text {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.similar-card,
+.wrongbook-entry-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.similar-card span,
+.wrongbook-entry-card p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.ghost-button.is-success {
+  border-color: rgba(90, 220, 160, 0.45);
+  background: rgba(90, 220, 160, 0.12);
+}
